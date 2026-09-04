@@ -1,11 +1,46 @@
-// Web App URL จาก Google Apps Script หลังบ้าน[cite: 1, 3]
+// Web App Deployment URL จาก Google Apps Script[cite: 1]
 const API_URL = "https://script.google.com/macros/s/AKfycbwOqznuNpdWpX7nyY7el_Z_ulFmb1VtH6fYOKBb903ukTxDfPGRA3htzOFmBhLQwj95nw/exec";
 
-// Local Application State
-let masterDataMap = new Map(); 
-let scanQueue = JSON.parse(localStorage.getItem("scanQueue")) || [];
+// Application State
+let currentMode = "IN"; // IN, OUT, AUDIT
+let masterDataMap = new Map(); // Barcode -> Product Info
+let scanQueue = JSON.parse(localStorage.getItem("smart_scan_queue")) || [];
+let lastScannedCode = "";
+let lastScanTime = 0;
+const SCAN_COOLDOWN_MS = 2000; // หน่วงเวลาป้องกันสแกนซ้ำ 2 วินาที
 
-// 1. เริ่มต้นทำงานเมื่อเปิดแอป
+// Register Service Worker สำหรับ PWA
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js")
+      .then(reg => console.log("[PWA] Service Worker registered:", reg.scope))
+      .catch(err => console.error("[PWA] Registration failed:", err));
+  });
+}
+
+// Audio Feedback (Web Audio API)
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function playBeepSound(type = "success") {
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  if (type === "success") {
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.15);
+  } else {
+    osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.3);
+  }
+}
+
+// 1. Initial Setup
 document.addEventListener("DOMContentLoaded", async () => {
   updateQueueUI();
   initNetworkListener();
@@ -13,29 +48,33 @@ document.addEventListener("DOMContentLoaded", async () => {
   initScanner();
 });
 
-// 2. ดึง Master Data จาก CacheService ของ API (doGet)[cite: 1, 4]
+// Switch Modes (IN, OUT, AUDIT)
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll(".mode-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.mode === mode);
+  });
+}
+
+// 2. ดึง Master Data มาแคชไว้ในเครื่อง
 async function loadMasterData() {
   try {
     const response = await fetch(API_URL);
     const result = await response.json();
-    
-    if (result.result === "success" && result.data && result.data.items) {
+
+    if (result.result === "success" && result.items) {
       masterDataMap.clear();
-      result.data.items.forEach(row => {
-        // คอลัมน์ 0 = SKU/Barcode, คอลัมน์ 1 = ชื่อสินค้า, คอลัมน์ 2 = Location
-        masterDataMap.set(String(row[0]).trim(), {
-          name: row[1] || "ไม่ระบุชื่อสินค้า",
-          location: row[2] || "N/A"
-        });
+      result.items.forEach(item => {
+        masterDataMap.set(String(item.barcode).trim(), item);
       });
-      console.log(`โหลด Master Data สำเร็จ (${result.source}) ทั้งหมด ${masterDataMap.size} รายการ`);
+      console.log(`[MasterData] Loaded ${masterDataMap.size} items.`);
     }
-  } catch (error) {
-    console.warn("ไม่สามารถดึง Master Data ได้ จะใช้งานข้อมูลแบบ Offline หรือสแกนโดยไม่ Lookup:", error);
+  } catch (err) {
+    console.warn("[MasterData] Fetch failed. Operating in offline/raw mode:", err);
   }
 }
 
-// 3. เริ่มระบบสแกนด้วย html5-qrcode
+// 3. เริ่มต้นเปิดระบบกล้องด้วย html5-qrcode
 function initScanner() {
   const html5QrCode = new Html5Qrcode("reader");
   const config = { fps: 10, qrbox: { width: 250, height: 250 } };
@@ -47,81 +86,94 @@ function initScanner() {
   ).catch(err => console.error("ไม่สามารถเปิดกล้องได้:", err));
 }
 
-// 4. เมื่อสแกนรหัสสำเร็จ
+// 4. เมื่อสแกนรหัสผ่านสำเร็จ
 function onScanSuccess(decodedText) {
+  const now = Date.now();
   const cleanBarcode = String(decodedText).trim();
-  
-  // Lookup ข้อมูลสินค้าจาก Master Data
-  const productInfo = masterDataMap.get(cleanBarcode) || { name: "ไม่พบข้อมูลสินค้าในระบบ", location: "DEFAULT" };
 
-  // แสดงผลที่ UI หน้าเว็บ
-  const resCard = document.getElementById("scanResultCard");
-  if (resCard) resCard.style.display = "block";
-  
-  const elBarcode = document.getElementById("resBarcode");
-  if (elBarcode) elBarcode.innerText = cleanBarcode;
-  
-  const elName = document.getElementById("resProductName");
-  if (elName) elName.innerText = productInfo.name;
-  
-  const elLoc = document.getElementById("resLocation");
-  if (elLoc) elLoc.innerText = productInfo.location;
+  // ป้องกันการสแกนรหัสเดิมซ้ำอย่างรวดเร็ว (Debounce/Cooldown)
+  if (cleanBarcode === lastScannedCode && (now - lastScanTime) < SCAN_COOLDOWN_MS) {
+    return;
+  }
 
-  // สร้าง Object ข้อมูลเตรียมส่ง
+  lastScannedCode = cleanBarcode;
+  lastScanTime = now;
+
+  // อ่านค่าจาก UI
+  const qtyInput = parseInt(document.getElementById("scanQty").value) || 1;
+  const locationInput = document.getElementById("locationInput").value || "DEFAULT";
+
+  // Lookup สินค้าจาก Master Data
+  const product = masterDataMap.get(cleanBarcode) || { name: "ไม่พบสินค้าใน Master Data", qty: 0 };
+
+  // ระบบสั่นเตือนบนมือถือ + เสียง Beep
+  if (navigator.vibrate) navigator.vibrate(100);
+  playBeepSound("success");
+
+  // อัปเดต UI ผลการสแกน
+  const resCard = document.getElementById("resultCard");
+  resCard.style.display = "block";
+  document.getElementById("resBarcode").innerText = cleanBarcode;
+  document.getElementById("resProductName").innerText = product.name;
+  document.getElementById("resStockQty").innerText = product.qty;
+  
+  const badge = document.getElementById("resActionBadge");
+  badge.innerText = `โหมด: ${currentMode} (${qtyInput > 0 ? '+' : ''}${qtyInput})`;
+
+  // สร้าง Payload
   const scanItem = {
     timestamp: new Date().toISOString(),
     barcode: cleanBarcode,
-    action: "SCAN",
-    quantity: 1,
-    location: productInfo.location,
-    userId: localStorage.getItem("userId") || "USER_MOBILE" // Audit trail[cite: 1, 2, 3]
+    productName: product.name,
+    action: currentMode,
+    quantity: qtyInput,
+    location: locationInput,
+    userId: localStorage.getItem("userId") || "OPERATOR"[cite: 1]
   };
 
-  // สะสมเข้า Queue ภายในเครื่อง (Offline-First)
+  // บันทึกลง Offline Queue ใน LocalStorage
   scanQueue.push(scanItem);
   saveQueueToLocalStorage();
 
-  // พยายามส่งซิงค์ลง Google Sheets อัตโนมัติหากเชื่อมต่ออินเทอร์เน็ต[cite: 1, 3]
+  // ส่งข้อมูลเข้าเซิร์ฟเวอร์แบบ Real-time หากออนไลน์
   if (navigator.onLine) {
     syncQueueWithBackend();
   }
 }
 
-// 5. ระบบซิงค์ข้อมูลส่งเข้า API แบบ Batch Operation (doPost)[cite: 1, 2, 3]
+// 5. ซิงค์คิวข้อมูลแบบ Batch Operation (doPost)[cite: 1]
 async function syncQueueWithBackend() {
   if (scanQueue.length === 0) return;
 
   const itemsToSend = [...scanQueue];
   const syncBtn = document.getElementById("syncBtn");
   if (syncBtn) {
-    syncBtn.innerText = "กำลังซิงค์...";
+    syncBtn.innerText = "กำลังซิงค์ข้อมูล...";
     syncBtn.disabled = true;
   }
 
   try {
     const response = await fetch(API_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "text/plain;charset=utf-8" // ป้องกันปัญหาเรื่อง CORS[cite: 3]
-      },
-      body: JSON.stringify(itemsToSend) // ส่ง Payload แบบ Array[cite: 2, 3]
+      headers: { "Content-Type": "text/plain;charset=utf-8" }, // เลี่ยง CORS กับ Apps Script[cite: 1]
+      body: JSON.stringify(itemsToSend)[cite: 1]
     });
 
     const result = await response.json();
 
     if (result.result === "success") {
-      // ลบรายการที่ซิงค์สำเร็จออกจาก Queue
       scanQueue = scanQueue.slice(itemsToSend.length);
       saveQueueToLocalStorage();
-      console.log(`ซิงค์ข้อมูลลง Sheets สำเร็จ ${result.inserted} รายการ`);[cite: 2, 3]
+      console.log(`[Sync] Successfully sent ${result.inserted} items.`);
+      await loadMasterData();
     } else {
       alert("เกิดข้อผิดพลาดจากเซิร์ฟเวอร์: " + result.message);
     }
-  } catch (error) {
-    console.error("การซิงค์ล้มเหลว ข้อมูลยังคงถูกเก็บไว้ใน Queue ออฟไลน์:", error);
+  } catch (err) {
+    console.error("[Sync] Failed. Items remain in offline queue.", err);
   } finally {
     if (syncBtn) {
-      syncBtn.innerText = "ซิงค์ข้อมูลลง Sheets";
+      syncBtn.innerText = "ซิงค์ข้อมูลเข้า Google Sheets";
       syncBtn.disabled = false;
     }
     updateQueueUI();
@@ -130,7 +182,7 @@ async function syncQueueWithBackend() {
 
 // Helper Functions
 function saveQueueToLocalStorage() {
-  localStorage.setItem("scanQueue", JSON.stringify(scanQueue));
+  localStorage.setItem("smart_scan_queue", JSON.stringify(scanQueue));
   updateQueueUI();
 }
 
@@ -141,15 +193,14 @@ function updateQueueUI() {
 
 function initNetworkListener() {
   const statusElem = document.getElementById("networkStatus");
-  
   const updateStatus = () => {
     if (!statusElem) return;
     if (navigator.onLine) {
-      statusElem.className = "badge badge-online";
+      statusElem.className = "status-badge online";
       statusElem.innerText = "Online";
-      syncQueueWithBackend(); // เมื่อกลับมาเน็ตติด ให้ซิงค์ข้อมูลค้างทันที
+      syncQueueWithBackend();
     } else {
-      statusElem.className = "badge badge-offline";
+      statusElem.className = "status-badge offline";
       statusElem.innerText = "Offline";
     }
   };
@@ -157,3 +208,4 @@ function initNetworkListener() {
   window.addEventListener("online", updateStatus);
   window.addEventListener("offline", updateStatus);
 }
+});

@@ -3,39 +3,99 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Inventory Scan System (PWA)</title>
+  <title>Smart Store Inventory Manager</title>
   <link rel="manifest" href="manifest.json">
   <script src="https://unpkg.com/html5-qrcode"></script>
   <style>
-    body { font-family: Arial, sans-serif; margin: 0; padding: 15px; background: #f4f6f9; }
-    .card { background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 15px; }
-    #reader { width: 100%; max-width: 500px; margin: auto; }
-    .status-bar { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 10px; }
-    .badge { padding: 4px 8px; border-radius: 4px; font-weight: bold; }
-    .badge-online { background: #d4edda; color: #155724; }
-    .badge-offline { background: #f8d7da; color: #721c24; }
-    button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; font-size: 16px; margin-top: 5px; }
+    :root {
+      --primary: #2563eb;
+      --success: #16a34a;
+      --danger: #dc2626;
+      --warning: #d97706;
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 12px; background: var(--bg); color: #1e293b; }
+    .container { max-width: 600px; margin: 0 auto; }
+    .card { background: var(--card-bg); padding: 16px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 12px; }
+    .header { display: flex; justify-content: space-between; align-items: center; }
+    .status-badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+    .online { background: #dcfce7; color: #15803d; }
+    .offline { background: #fee2e2; color: #b91c1c; }
+    
+    /* Mode Selector Buttons */
+    .mode-selector { display: flex; gap: 8px; margin: 12px 0; }
+    .mode-btn { flex: 1; padding: 12px; border: 2px solid #e2e8f0; border-radius: 8px; background: #fff; font-size: 14px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+    .mode-btn.active[data-mode="IN"] { background: #dcfce7; border-color: var(--success); color: var(--success); }
+    .mode-btn.active[data-mode="OUT"] { background: #fee2e2; border-color: var(--danger); color: var(--danger); }
+    .mode-btn.active[data-mode="AUDIT"] { background: #fef3c7; border-color: var(--warning); color: var(--warning); }
+
+    /* Control Inputs */
+    .controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    label { font-size: 12px; color: #64748b; font-weight: bold; }
+    input, select { width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; font-size: 16px; margin-top: 4px; }
+    
+    /* Scanner Box */
+    #reader { width: 100%; border-radius: 8px; overflow: hidden; background: #000; min-height: 250px; }
+    
+    /* Scan Result Alert */
+    .result-card { display: none; border-left: 5px solid var(--primary); animation: fadeIn 0.3s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+    
+    .btn-sync { width: 100%; padding: 14px; background: var(--primary); color: white; border: none; border-radius: 8px; font-weight: bold; font-size: 16px; cursor: pointer; }
+    .btn-sync:disabled { background: #94a3b8; }
   </style>
 </head>
 <body>
-
-  <div class="card">
-    <div class="status-bar">
-      <span>สถานะ: <span id="networkStatus" class="badge badge-online">Online</span></span>
-      <span>คิวรอส่ง: <strong id="queueCount">0</strong> รายการ</span>
+  <div class="container">
+    <!-- แถบแสดงสถานะ -->
+    <div class="card header">
+      <div>
+        <h2 style="margin:0; font-size: 18px;">Smart Store Scanner</h2>
+        <span style="font-size: 12px; color: #64748b;">คิวรอส่ง: <b id="queueCount">0</b> รายการ</span>
+      </div>
+      <span id="networkStatus" class="status-badge online">Online</span>
     </div>
-    <button id="syncBtn" onclick="syncQueueWithBackend()">ซิงค์ข้อมูลลง Sheets</button>
-  </div>
 
-  <div class="card">
-    <div id="reader"></div>
-  </div>
+    <!-- โหมดการทำงาน (IN / OUT / AUDIT) -->
+    <div class="card">
+      <label>เลือกโหมดการสแกน</label>
+      <div class="mode-selector">
+        <button class="mode-btn active" data-mode="IN" onclick="setMode('IN')">📥 รับเข้า (+)</button>
+        <button class="mode-btn" data-mode="OUT" onclick="setMode('OUT')">📤 ตัดจ่าย (-)</button>
+        <button class="mode-btn" data-mode="AUDIT" onclick="setMode('AUDIT')">🔍 ตรวจนับ</button>
+      </div>
 
-  <div class="card" id="scanResultCard" style="display:none;">
-    <h3>ผลการสแกนล่าสุด</h3>
-    <p><strong>SKU/Barcode:</strong> <span id="resBarcode">-</span></p>
-    <p><strong>ชื่อสินค้า:</strong> <span id="resProductName">กำลังโหลด Master Data...</span></p>
-    <p><strong>สถานที่:</strong> <span id="resLocation">-</span></p>
+      <div class="controls-grid">
+        <div>
+          <label for="scanQty">จำนวน/ครั้ง</label>
+          <input type="number" id="scanQty" value="1" min="1">
+        </div>
+        <div>
+          <label for="locationInput">สถานที่/คลัง</label>
+          <input type="text" id="locationInput" value="STORE-A">
+        </div>
+      </div>
+    </div>
+
+    <!-- สแกนเนอร์กล้อง -->
+    <div class="card" style="padding: 8px;">
+      <div id="reader"></div>
+    </div>
+
+    <!-- แสดงผลการสแกนล่าสุด -->
+    <div class="card result-card" id="resultCard">
+      <div style="display:flex; justify-between; align-items: center;">
+        <h4 style="margin:0; font-size:16px;" id="resProductName">กำลังโหลด...</h4>
+        <span id="resActionBadge" class="status-badge" style="background:#e2e8f0;">-</span>
+      </div>
+      <p style="margin: 6px 0 0 0; font-size: 14px; color: #475569;">
+        Barcode: <strong id="resBarcode">-</strong> | สต็อกระบบ: <strong id="resStockQty">-</strong>
+      </p>
+    </div>
+
+    <!-- ปุ่มซิงค์ข้อมูล -->
+    <button id="syncBtn" class="btn-sync" onclick="syncQueueWithBackend()">ซิงค์ข้อมูลเข้า Google Sheets</button>
   </div>
 
   <script src="app.js"></script>
