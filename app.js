@@ -1,5 +1,5 @@
 // Web App Deployment URL จาก Google Apps Script[cite: 1]
-const API_URL = "https://script.google.com/macros/s/AKfycbwOqznuNpdWpX7nyY7el_Z_ulFmb1VtH6fYOKBb903ukTxDfPGRA3htzOFmBhLQwj95nw/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbzwDPfmlFpGuws-Bn7_yoOsNY0yI72ROQkfqj7WtabpF7LQzhej8nw27DW_6-M6AOIiFQ/exec";
 
 // Application State
 let currentMode = "IN"; // IN, OUT, AUDIT
